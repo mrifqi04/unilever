@@ -1,0 +1,277 @@
+<?php
+
+namespace App\Http\Controllers\Warehouse;
+
+use App\Http\Controllers\Controller;
+use App\Http\Controllers\GenericController;
+use App\Models\Adr;
+use App\Models\Driver\DeliveryOrder;
+use App\Models\Driver\Vehicles;
+use App\Models\OutletManagement\Outlet;
+use App\Models\Unilever\OutletProgress;
+use App\Models\Province;
+use App\Models\Warehouse\RoutePlan;
+use Carbon\Carbon;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Redirect;
+use Illuminate\Support\Facades\Validator;
+
+class RoutePlanController extends GenericController
+{
+
+//    protected $relation = [
+//        'vehicleDriver.driver',
+//        'vehicleDriver.vehicle',
+//        'journey',
+//        'deliveryProgress',
+//        'deliveryOrders',
+//        'outlet'
+//    ];
+
+    private function edit_rules($id)
+    {
+        $rules = [
+            'outlet' => ['required'],
+            'cities' => ['required'],
+            'date' => ['required']
+//            'license_number' => ['required', 'max:12', 'unique:' . Vehicles::class . ',license_number,' . $id],
+        ];
+        return $rules;
+    }
+
+    protected $rules = [
+//        'license_number' => 'required|unique:' . Vehicles::class . ',license_number',
+        'provinces' => 'required',
+        'cities' => 'required',
+        'date' => 'required'
+    ];
+
+    private function relation()
+    {
+        return [
+            'deliveryOrders',
+            'outlet.province' => function ($query) {
+                $query->select('id', 'name');
+            },
+            'outlet.city' => function ($query) {
+                $query->select('id', 'name');
+            },
+            'outlet.district' => function ($query) {
+                $query->select('id', 'name');
+            },
+            'outlet.village' => function ($query) {
+                $query->select('id', 'name');
+            },
+            'outlet' => function ($query) {
+                $query->select('id', 'name', 'address', 'phone', 'id_province', 'id_city', 'id_district', 'id_village');
+            }
+        ];
+    }
+
+    /**
+     * Display a listing of the resource.
+     *
+     * @return \Illuminate\Http\Response
+     */
+    public function index()
+    {
+        $data = RoutePlan::with($this->relation())->orderBy('created_at', 'DESC');
+        $data = $data->whereHas('outlet.mapOutlet.outletProgress', function ($query) {
+            $query->where('status_active', 1);
+            $query->where('section', 'uli');
+            $query->where('status_progress', '5');
+            $query->select();
+        });
+        $data = $data->paginate(10);
+//        dd($data);
+        $data = [
+            'datas' => $data
+        ];
+        return view('Driver/RoutePlan/index', $data);
+    }
+
+    /**
+     * Show the form for creating a new resource.
+     *
+     * @return \Illuminate\Http\Response
+     */
+    public function create()
+    {
+        $provinces = Province::all()->pluck('name', 'id');
+        $datas = [
+            'provinces' => $provinces,
+            'route' => route('route_plan.store')
+        ];
+        return view('Driver/RoutePlan/create', $datas);
+    }
+
+    /**
+     * Store a newly created resource in storage.
+     *
+     * @param  \Illuminate\Http\Request $request
+     * @return \Illuminate\Http\Response
+     */
+    public function store(Request $request)
+    {
+        //ADR0030000
+        $validator = Validator::make($request->all(), $this->rules);
+        if ($validator->fails()) {
+            return Redirect::to(route('route_plan.create'))
+                ->withErrors($validator)->withInput($request->all());
+        } else {
+		DB::beginTransaction();
+            try {
+                $count = Adr::find(1);
+                $adr = (date('Y-m-d', strtotime($count->updated_at)) == date('Y-m-d')) ? $count->current_counter : $count->current_counter + 1;
+                $data = new RoutePlan();
+                $delivery_order = [
+			'id' => Carbon::now()->getPreciseTimestamp(6),
+                    'adr' => $adr,
+                    'id_province' => $request->provinces,
+                    'id_city' => $request->cities,
+			'created_date' => Carbon::now(),
+			'created_at' => Carbon::now()->unix(),
+                ];
+                $do = $data->deliveryOrders()->create($delivery_order);
+                for ($i = 0; $i < count($request->outlet); $i++) {
+                    $date = $request->post('reportrange');
+                    $start = date('Y-m-d H:i:s', strtotime($date[$i]));
+                    $end = date('Y-m-d H:i:s', strtotime($date[$i]));
+                    $data->id = Carbon::now()->getPreciseTimestamp(3);
+                    $data->id_outlet = $request->outlet[$i];
+                    $data->id_cabinet = $request->cabinet[$i];
+                    $data->id_delivery_order = $do->id;
+                    $data->start_date = $start;
+                    $data->end_date = $end;
+                    $data->created_by = Auth::user()->id;
+                    $data->created_at = Carbon::now()->unix();
+			$data->update_at = Carbon::now()->unix();
+			$data->save();
+                    $delivery_prog = [
+                        'id' => Carbon::now()->getPreciseTimestamp(3),
+                        'id_route_plans' => $data->id,
+                        'status_progress' => "7"
+                    ];
+                    $data->deliveryProgress()->create($delivery_prog);
+                }
+                $count->current_counter = $adr;
+                $count->updated_at = now();
+                $count->save();
+                DB::commit();
+                $this->flashMessage('success', 'CREATE', 'Add data success');
+                return Redirect::to(route('route_plan.index'));
+            } catch (\Exception $e) {
+                DB::rollback();
+                Log::error($e);
+                $this->flashMessage('error', 'CREATE', $e->getMessage());
+                return Redirect::to(route('route_plan.create'));
+            }
+        }
+    }
+
+    /**
+     * Display the specified resource.
+     *
+     * @param  int $id
+     * @return \Illuminate\Http\Response
+     */
+    public function show($id)
+    {
+        $relation = [
+            'deliveryProgress',
+            'deliveryOrders',
+            'outlet',
+            'outlet.juragan',
+            'outlet.district',
+            'outlet.village',
+            'outlet.mapOutlet.OutletProgress',
+            'journeyRoute',
+        ];
+        $data = RoutePlan::with($relation)->where('id', $id)->first();
+        $survey = DB::table("v_request_detail")->where("id_outlet", "=", $data->id_outlet)->first();
+        $pictureIds = OutletProgress::getPictureIds($data->id_outlet)->map(function ($item) {
+            return $item->id;
+        });
+        $datas = [
+            'data' => $data,
+            'pictureIds' => $pictureIds,
+            'survey' => $survey
+        ];
+//        dd($datas);
+        return view('Driver/RoutePlan/show', $datas);
+    }
+
+    /**
+     * Show the form for editing the specified resource.
+     *
+     * @param  int $id
+     * @return \Illuminate\Http\Response
+     */
+    public function edit($id)
+    {
+        $route = RoutePlan::with($this->relation())->find($id);
+        $datas = [
+            'route_plan' => $route,
+            'route' => route('route_plan.update', ['route_plan' => $id])
+        ];
+        return view('Driver/RoutePlan/edit', $datas);
+    }
+
+    /**
+     * Update the specified resource in storage.
+     *
+     * @param  \Illuminate\Http\Request $request
+     * @param  int $id
+     * @return \Illuminate\Http\Response
+     */
+    public function update(Request $request, $id)
+    {
+//        $validator = Validator::make($request->all(), $this->rules);
+//        if ($validator->fails()) {
+//            return Redirect::to(route('route_plan.create'))
+//                ->withErrors($validator)->withInput($request->all());
+//        } else {
+//            try {
+//                DB::beginTransaction();
+//                $data = RoutePlan::find($id);
+//                $do = DeliveryOrder::find($data->id_delivery_order);
+//                $do->id_province = $request->provinces;
+//                $do->id_city = $request->city;
+//                $do->save();
+//                for ($i = 0; $i < count($request->outlet); $i++) {
+//                    $ex_time = explode(' - ', $request->post('reportrange_' . $i));
+//                    $start = date('Y-m-d H:i:s', strtotime($ex_time[0]));
+//                    $end = date('Y-m-d H:i:s', strtotime($ex_time[1]));
+//                    $data->id_outlet = $request->outlet[$i];
+//                    $data->id_cabinet = $request->cabinet[$i];
+//                    $data->start_date = $start;
+//                    $data->end_date = $end;
+//                    $data->updated_by = Auth::user()->id;
+//                    $data->save();
+//                }
+//                DB::commit();
+//                $this->flashMessage('success', 'CREATE', 'Add data success');
+//                return Redirect::to(route('route_plan.index'));
+//            } catch (\Exception $e) {
+//                DB::rollback();
+//                Log::error($e);
+//                $this->flashMessage('error', 'CREATE', $e->getMessage());
+//                return Redirect::to(route('route_plan.create'));
+//            }
+//        }
+    }
+
+    /**
+     * Remove the specified resource from storage.
+     *
+     * @param  int $id
+     * @return \Illuminate\Http\Response
+     */
+    public function destroy($id)
+    {
+        //
+    }
+}

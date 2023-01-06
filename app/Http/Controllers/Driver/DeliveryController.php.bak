@@ -1,0 +1,258 @@
+<?php
+
+namespace App\Http\Controllers\Driver;
+
+use App\Http\Controllers\GenericController;
+use App\Models\Driver\JourneyPlan;
+use App\Models\OutletManagement\MapOutlet;
+use App\Models\OutletManagement\OutletActivity;
+use App\Models\OutletManagement\OutletProgress;
+use App\Models\Province;
+use PDF;
+use Carbon\Carbon;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Redirect;
+use Illuminate\Support\Facades\Validator;
+use Ramsey\Uuid\Uuid;
+
+class DeliveryController extends GenericController
+{
+
+    protected $rules = [
+        'provinces' => 'required',
+        'city' => 'required',
+        'date' => 'required',
+        'route_plan' => 'required',
+        'driver' => 'required',
+        'vehicle' => 'required'
+    ];
+
+    private function relation()
+    {
+        return [
+//            'routePlan',
+//            'routePlan.outlet' => function ($query) {
+//                $query->select('id', 'name', 'address', 'phone', 'id_province', 'id_city', 'id_district', 'id_village');
+//            },
+//            'routePlan.deliveryOrders',
+//            'routePlan.deliveryProgress' => function ($query) {
+//                $query->select('id', 'id_route_plan', 'status_progress');
+//            },
+//            'routePlan.vehicleDriver' => function ($query) {
+//                $query->select('id', 'id_driver', 'id_vehicle');
+//            },
+//            'routePlan.vehicleDriver.driver' => function ($query) {
+//                $query->select('id', 'name');
+//            },
+//            'routePlan.vehicleDriver.vehicle' => function ($query) {
+//                $query->select('id', 'license_number');
+//            },
+//            'routePlan.outlet.province' => function ($query) {
+//                $query->select('id', 'name');
+//            },
+//            'routePlan.outlet.city' => function ($query) {
+//                $query->select('id', 'name');
+//            },
+//            'routePlan.outlet.district' => function ($query) {
+//                $query->select('id', 'name');
+//            },
+//            'routePlan.outlet.village' => function ($query) {
+//                $query->select('id', 'name');
+//            }
+        ];
+    }
+
+    /**
+     * Display a listing of the resource.
+     *
+     * @return \Illuminate\Http\Response
+     */
+    public function index()
+    {
+//        $data = JourneyPlan::with($this->relation())->orderBy('created_at', 'DESC');
+        $data = JourneyPlan::orderBy('created_at', 'DESC');
+//        $data = $data->whereHas('routePlan.deliveryProgress', function ($query) {
+//            $query->select();
+//        });
+//        dd($data->toSql());
+        $data = $data->paginate(10);
+//        dd($data);
+        $data = [
+            'datas' => $data
+        ];
+        return view('Warehouse/Delivery/index', $data);
+
+    }
+
+    /**
+     * Show the form for creating a new resource.
+     *
+     * @return \Illuminate\Http\Response
+     */
+    public function create()
+    {
+        $provinces = Province::all()->pluck('name', 'id');
+        $datas = [
+            'provinces' => $provinces,
+            'route' => route('delivery.store')
+        ];
+        return view('Warehouse/Delivery/create', $datas);
+    }
+
+    /**
+     * Store a newly created resource in storage.
+     *
+     * @param  \Illuminate\Http\Request $request
+     * @return \Illuminate\Http\Response
+     */
+    public function store(Request $request)
+    {
+        $validator = Validator::make($request->all(), $this->rules);
+        if ($validator->fails()) {
+            return Redirect::to(route('delivery.create'))
+                ->withErrors($validator)->withInput($request->all());
+        } else {
+            try {
+                DB::beginTransaction();
+                for ($i = 0; $i < count($request->route_plan); $i++) {
+                    $ex = explode('_', $request->route_plan[$i]);
+                    $route_plan[] = $ex[0];
+                    $outlet[] = $ex[1];
+                }
+                $data = new JourneyPlan();
+                $data->id = Uuid::uuid4()->toString();
+                $data->name = $request->name;
+                $data->assigner = Auth::user()->id;
+                $data->assign_to = $request->driver;
+                $data->id_province = $request->province;
+                $data->id_city = $request->city;
+                $data->start_date = date('Y-m-d H:i:s.u', strtotime($request->date));
+                $data->end_date = date('Y-m-d H:i:s.u', strtotime($request->date));
+                $data->is_deleted = 1;
+                $data->created_at = Carbon::now()->timestamp;
+                $data->save();
+                $data->journeyRoute()->sync($route_plan);
+
+                foreach ($outlet as $ot) {
+                    $mapo = MapOutlet::where('id_outlet', $ot)->first();
+                    $outact = new OutletActivity();
+                    $mbuh = OutletActivity::where('id_map_outlet', $mapo->id)->orderBy('created_date', 'desc')->first();
+                    $mbuh_outpro = OutletProgress::where('id_map_outlet', $mapo->id)->where('status_active', 1)->first();
+
+                    $outact->id = Uuid::uuid4()->toString();
+                    $outact->id_map_outlet = $mapo->id;
+                    $outact->id_answer = $mbuh->id_answer;
+                    $outact->is_mandiri = $mapo->is_mandiri;
+                    $outact->section = 'driver';
+                    $outact->is_deleted = 1;
+                    $outact->is_mandiri = $mapo->is_mandiri;
+                    $outact->created_date = Carbon::now();
+                    $outact->created_by = Auth::user()->id;
+                    $outact->save();
+
+                    $mbuh_outpro->status_active = 2;
+                    $mbuh_outpro->save();
+
+                    $outpro = new OutletProgress();
+                    $outpro->id = Uuid::uuid4()->toString();
+                    $outpro->id_outlet_activity = $outact->id;
+                    $outpro->status_progres = '7';
+                    $outpro->id_mapo_utlet = $mapo->id;
+                    $outpro->id_answers = $mbuh->id_answers;
+                    $outpro->status_active = 1;
+                    $outpro->created_date = Carbon::now();
+                    $outpro->created_at = Carbon::now()->unix();
+                    $outpro->updated_at = Carbon::now()->unix();
+                    $outpro->created_by = Auth::user()->id;
+                    $outpro->section = 'driver';
+                    $outpro->recommended_date = $mbuh_outpro->recommended_date;
+                    $outpro->send_date = $mbuh_outpro->send_date;
+                    $outpro->save();
+                }
+                DB::commit();
+                $this->flashMessage('success', 'CREATE', 'Add data success');
+                return Redirect::to(route('delivery.index'));
+            } catch (\Exception $e) {
+                DB::rollback();
+                Log::error($e);
+                $this->flashMessage('error', 'CREATE', $e->getMessage());
+                return Redirect::to(route('delivery.create'));
+            }
+        }
+    }
+
+    /**
+     * Display the specified resource.
+     *
+     * @param  int $id
+     * @return \Illuminate\Http\Response
+     */
+    public function show($id)
+    {
+        //
+    }
+
+    /**
+     * Show the form for editing the specified resource.
+     *
+     * @param  int $id
+     * @return \Illuminate\Http\Response
+     */
+    public function edit($id)
+    {
+        //
+    }
+
+    /**
+     * Update the specified resource in storage.
+     *
+     * @param  \Illuminate\Http\Request $request
+     * @param  int $id
+     * @return \Illuminate\Http\Response
+     */
+    public function update(Request $request, $id)
+    {
+        //
+    }
+
+    /**
+     * Remove the specified resource from storage.
+     *
+     * @param  int $id
+     * @return \Illuminate\Http\Response
+     */
+    public function destroy($id)
+    {
+        //
+    }
+
+    public function exportPDF(Request $request)
+    {
+        $relation = [
+            'journeyRoute',
+            'journeyRoute.deliveryOrders',
+            'journeyRoute.outlet',
+            'journeyRoute.outlet.juragan',
+            'journeyRoute.cabinet'
+        ];
+        $header = JourneyPlan::with(['journeyRoute', 'journeyRoute.deliveryOrders', 'driver', 'vehicle'])->where('id', $request->get('id'))->first();
+        $data = JourneyPlan::with($relation)->where('id', $request->get('id'));
+        $data = $data->get();
+        $datas = [
+            'header' => $header,
+            'data' => $data
+        ];
+        $pdf = PDF::setOptions([
+            'dpi' => 50,
+            'defaultFont' => 'sans-serif',
+            'isHtml5ParserEnabled' => true,
+            'isRemoteEnabled' => true,
+            'debugCss' => false
+        ])->loadView('Warehouse.Delivery.export', $datas)->setPaper('a4', 'landscape');
+//        return $pdf->stream();
+        return $pdf->download('ADR00'.$header->journeyRoute[0]->deliveryOrders->adr.'.pdf');;
+    }
+}

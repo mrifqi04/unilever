@@ -1,0 +1,105 @@
+<?php
+
+namespace App\Http\Controllers\Master;
+
+use App\Http\Controllers\Controller;
+use App\Models\Driver\Drivers;
+use App\Models\Driver\Vehicles;
+use App\Models\OutletManagement\Outlet;
+use App\Models\Warehouse\Cabinets;
+use Carbon\Carbon;
+use Illuminate\Http\Request;
+use App\Models\Province;
+use App\Models\City;
+use App\Models\District;
+use App\Models\Village;
+
+class GeoController extends Controller
+{
+
+    public function province()
+    {
+        $users = new Province();
+        $data = $users->all();
+
+        return response()->json($data);
+    }
+
+    public function city(Request $request)
+    {
+        $users = new City();
+        $data = $users->where("id_province", $request->get("province_id"))->get();
+        return response()->json($data);
+    }
+
+    public function district(Request $request)
+    {
+        $users = new District();
+        $data = $users->where("id_city", $request->get("city_id"))->get();
+        return response()->json($data);
+    }
+
+    public function village(Request $request)
+    {
+        $users = new Village();
+        $data = $users->where("id_district", $request->get("district_id"))->get();
+        return response()->json($data);
+    }
+
+    public function driver(Request $request)
+    {
+        $users = new Drivers();
+//        $data = $users->where("id_village", $request->get("village_id"))->get();
+        $data = $users->where("id_district", $request->get("district_id"))->get();
+        return response()->json($data);
+    }
+
+    public function vehicle(Request $request)
+    {
+        $users = new Vehicles();
+//        $data = $users->where("id_village", $request->get("village_id"))->get();
+        $data = $users->where("id_city", $request->get("city_id"))->get(['id', 'license_number']);
+        return response()->json($data);
+    }
+
+    public function outlet(Request $request)
+    {
+        $date = date('Y-m-d', strtotime($request->get("date")));
+        $users = new Outlet();
+        $users = $users->whereHas('mapOutlet.outletProgress', function ($query) use ($date) {
+            $query->where('status_active', 1);
+            $query->where('section', 'uli');
+            $query->where('status_progress', '5');
+            $query->whereDate('send_date', '>=', $date);
+            $query->whereDate('send_date', '<=', $date);
+            $query->select();
+        });
+        $data = $users->where("id_city", $request->get("city_id"))->get();
+
+        return response()->json($data);
+    }
+
+    public function cabinet()
+    {
+        $users = new Cabinets();
+        $data = $users->all(['id', 'brand']);
+        return response()->json($data);
+    }
+
+    public function route_plan(Request $request)
+    {
+        $relation = [
+            'deliveryOrders.routePlan.outlet'
+        ];
+        $date = date('Y-m-d', strtotime($request->get("date")));
+        $data = new City();
+        $data = $data->with($relation);
+        $data = $data->whereHas('deliveryOrders.routePlan', function ($query) use ($date){
+            $query->whereDate('start_date', '>=', $date);
+            $query->whereDate('start_date', '<=', $date);
+        });
+        $data = $data->whereDoesntHave('deliveryOrders.routePlan.journeyRoute');
+        $data = $data->where("id", $request->get("city_id"))->first();
+        return response()->json($data);
+    }
+}
